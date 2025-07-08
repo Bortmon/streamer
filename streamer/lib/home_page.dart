@@ -1,7 +1,7 @@
-// lib/home_page.dart
-
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart'; 
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:streamer/services/cast_service.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -11,11 +11,19 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
+  final CastService _castService = CastService();
   InAppWebViewController? webViewController;
-  final String initialUrl = "https://google.com";
+  final String initialUrl = "https://flixtor.to";
+  String? _streamUrl;
 
   void _castVideo() {
-    print("Cast knop ingedrukt.");
+    if (_streamUrl != null) {
+      _castService.castVideo(_streamUrl!);
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Wacht tot de video laadt om te kunnen casten.')),
+      );
+    }
   }
 
   @override
@@ -24,10 +32,13 @@ class _HomePageState extends State<HomePage> {
       appBar: AppBar(
         title: const Text('Streamer'),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.cast),
-            onPressed: _castVideo,
-            tooltip: 'Cast naar apparaat',
+          SizedBox(
+            width: 56,
+            child: AndroidView(
+              viewType: 'cast_button',
+              layoutDirection: TextDirection.ltr,
+              creationParamsCodec: const StandardMessageCodec(),
+            ),
           ),
         ],
       ),
@@ -36,12 +47,28 @@ class _HomePageState extends State<HomePage> {
         onWebViewCreated: (controller) {
           webViewController = controller;
         },
+        onLoadResource: (controller, resource) {
+          final url = resource.url.toString();
+          if (url.contains('master.m3u8')) {
+            if (_streamUrl != url) {
+              print('Master M3U8 gevonden: $url');
+              setState(() {
+                _streamUrl = url;
+              });
+            }
+          }
+        },
         initialSettings: InAppWebViewSettings(
-          javaScriptEnabled: true, 
-          mediaPlaybackRequiresUserGesture: false, 
+          javaScriptEnabled: true,
+          mediaPlaybackRequiresUserGesture: false,
           useWideViewPort: true,
           loadWithOverviewMode: true,
         ),
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: _castVideo,
+        child: const Icon(Icons.play_arrow),
+        tooltip: 'Start Casting',
       ),
     );
   }
