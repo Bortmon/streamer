@@ -3,12 +3,11 @@ import 'package:flutter/services.dart';
 class CastService {
   static const MethodChannel _channel = MethodChannel('com.example.streamer/cast');
 
-  Future<void> castVideo(String url) async {
+  Future<void> startSmartCasting(String url) async {
     try {
-      print('Flutter roept native "castVideo" aan met URL: $url');
-      await _channel.invokeMethod('castVideo', {'url': url});
+      await _channel.invokeMethod('startSmartCasting', {'url': url});
     } on PlatformException catch (e) {
-      print("Fout bij het aanroepen van native cast: ${e.message}");
+      print("Fout bij het starten van smart casting: ${e.message}");
     }
   }
 }
