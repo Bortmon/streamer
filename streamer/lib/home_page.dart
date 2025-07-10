@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:streamer/screens/cast_controller_screen.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 import 'package:streamer/services/cast_service.dart';
 
@@ -11,28 +13,111 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   final CastService _castService = CastService();
+
   InAppWebViewController? webViewController;
   final String initialUrl = "https://flixtor.to";
-  String? _streamUrl;
-  final List<String> _detectedUrls = [];
 
-  void _startSmartCasting() {
+  String? _streamUrl;
+  String? _videoTitle;
+  final List<Map<String, String>> _detectedStreams = [];
+  bool _isCasting = false;
+
+  void _handleCastButtonPress() async {
     if (_streamUrl == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Geen stream gevonden. Start eerst een video op de website.'),
+          content: Text('Geen stream geselecteerd. Start eerst een video.'),
           backgroundColor: Colors.orange,
         ),
       );
       return;
     }
-    _castService.startSmartCasting(_streamUrl!);
+
+    final status = await _castService.getStatus();
+
+    if (status != null && status['isConnected'] == true) {
+      _openCastController();
+    } else {
+      _startCasting();
+    }
+  }
+
+  void _startCasting() {
+    if (_streamUrl == null) return;
+
+    final regex = RegExp(r'\/([a-f0-9]{16})\/');
+    final match = regex.firstMatch(_streamUrl!);
+    List<Map<String, String>> subtitles = [];
+
+    if (match != null && match.group(1) != null) {
+      final uniqueId = match.group(1)!;
+      final formattedId = '${uniqueId[0]}/${uniqueId[1]}/${uniqueId[2]}/$uniqueId';
+      const subtitleBaseUrl = 'https://flixtor.to/subsa/';
+
+      subtitles = [
+        {'url': '$subtitleBaseUrl$formattedId.English.vtt', 'name': 'English', 'lang': 'en'},
+        {'url': '$subtitleBaseUrl$formattedId.Dutch.vtt', 'name': 'Dutch', 'lang': 'nl'},
+      ];
+    } else {
+      print("Kon geen ID vinden in stream URL, ondertitels worden niet meegestuurd.");
+    }
+
+    _castService.startSmartCasting(
+      _streamUrl!,
+      _videoTitle ?? 'Onbekende video',
+      subtitles,
+    );
+
+    setState(() {
+      _isCasting = true;
+    });
+
+    Future.delayed(const Duration(seconds: 1), () {
+      _openCastController();
+    });
+  }
+
+  void _openCastController() {
+    if (_streamUrl == null) return;
+
+    final regex = RegExp(r'\/([a-f0-9]{16})\/');
+    final match = regex.firstMatch(_streamUrl!);
+    List<Map<String, String>> subtitlesForUi = [];
+    if (match != null && match.group(1) != null) {
+      final uniqueId = match.group(1)!;
+      final formattedId = '${uniqueId[0]}/${uniqueId[1]}/${uniqueId[2]}/$uniqueId';
+      const subtitleBaseUrl = 'https://flixtor.to/subsa/';
+      subtitlesForUi = [
+        {'url': '$subtitleBaseUrl$formattedId.English.vtt', 'name': 'English', 'lang': 'en'},
+        {'url': '$subtitleBaseUrl$formattedId.Dutch.vtt', 'name': 'Dutch', 'lang': 'nl'},
+      ];
+    }
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => CastControllerScreen(
+        videoUrl: _streamUrl!,
+        videoTitle: _videoTitle ?? 'Onbekende video',
+        availableSubtitles: subtitlesForUi,
+      ),
+    ).whenComplete(_updateCastingStatus);
+  }
+
+  void _updateCastingStatus() async {
+    final status = await _castService.getStatus();
+    if (mounted && status != null) {
+      setState(() {
+        _isCasting = status['isConnected'] ?? false;
+      });
+    }
   }
 
   void _showDetectedUrls() {
-    if (_detectedUrls.isEmpty) {
+    if (_detectedStreams.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Geen URLs gedetecteerd')),
+        const SnackBar(content: Text('Geen streams gedetecteerd')),
       );
       return;
     }
@@ -40,24 +125,28 @@ class _HomePageState extends State<HomePage> {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Gedetecteerde URLs'),
+        title: const Text('Gedetecteerde Streams'),
         content: SizedBox(
           width: double.maxFinite,
           child: ListView.builder(
             shrinkWrap: true,
-            itemCount: _detectedUrls.length,
+            itemCount: _detectedStreams.length,
             itemBuilder: (context, index) {
-              final url = _detectedUrls[index];
+              final stream = _detectedStreams[index];
               return ListTile(
-                title: Text(url, style: const TextStyle(fontSize: 12)),
+                title: Text(
+                  stream['title'] ?? 'Onbekende video',
+                  style: const TextStyle(fontWeight: FontWeight.bold),
+                ),
                 trailing: IconButton(
                   icon: const Icon(Icons.play_arrow_rounded),
                   onPressed: () {
                     Navigator.of(context).pop();
                     setState(() {
-                      _streamUrl = url;
+                      _streamUrl = stream['url'];
+                      _videoTitle = stream['title'];
                     });
-                    _startSmartCasting();
+                    _startCasting();
                   },
                 ),
               );
@@ -76,25 +165,28 @@ class _HomePageState extends State<HomePage> {
 
   void _injectStreamDetector() async {
     if (webViewController == null) return;
-
     const jsCode = '''
       (function() {
-        function isMasterStream(url) {
-          return url.includes('master.m3u8');
+        function isMasterStream(url) { return url.includes('master.m3u8') || url.includes('playlist.m3u8') || url.includes('.m3u8'); }
+        function extractVideoTitle() {
+          const mainTitle = document.querySelector('.watch-header');
+          if (mainTitle) return mainTitle.textContent.trim();
+          const fallbackTitle = document.querySelector('h1, .title, .video-title, .movie-title');
+          if (fallbackTitle) return fallbackTitle.textContent.trim();
+          const pageTitle = document.querySelector('title');
+          if (pageTitle) return pageTitle.textContent.trim();
+          return 'Video Stream';
+        }
+        function reportStream(url) {
+          const title = extractVideoTitle();
+          window.flutter_inappwebview.callHandler('streamDetected', { url: url, title: title });
         }
         const originalOpen = XMLHttpRequest.prototype.open;
-        XMLHttpRequest.prototype.open = function(method, url) {
-          if (isMasterStream(url)) { window.flutter_inappwebview.callHandler('streamDetected', url); }
-          return originalOpen.apply(this, arguments);
-        };
+        XMLHttpRequest.prototype.open = function(method, url) { if (isMasterStream(url)) { reportStream(url); } return originalOpen.apply(this, arguments); };
         const originalFetch = window.fetch;
-        window.fetch = function(url, options) {
-          if (typeof url === 'string' && isMasterStream(url)) { window.flutter_inappwebview.callHandler('streamDetected', url); }
-          return originalFetch.apply(this, arguments);
-        };
+        window.fetch = function(url, options) { if (typeof url === 'string' && isMasterStream(url)) { reportStream(url); } return originalFetch.apply(this, arguments); };
       })();
     ''';
-    
     try {
       await webViewController!.evaluateJavascript(source: jsCode);
     } catch (e) {
@@ -110,8 +202,8 @@ class _HomePageState extends State<HomePage> {
         actions: [
           IconButton(
             icon: Badge(
-              label: Text('${_detectedUrls.length}'),
-              isLabelVisible: _detectedUrls.isNotEmpty,
+              label: Text('${_detectedStreams.length}'),
+              isLabelVisible: _detectedStreams.isNotEmpty,
               child: const Icon(Icons.video_library_outlined),
             ),
             onPressed: _showDetectedUrls,
@@ -127,7 +219,7 @@ class _HomePageState extends State<HomePage> {
             color: _streamUrl != null ? Colors.green.shade100 : Colors.red.shade100,
             child: Text(
               _streamUrl != null 
-                ? 'Stream geselecteerd! Druk op Play om te casten.'
+                ? 'Stream geselecteerd: ${_videoTitle ?? 'Onbekende video'}'
                 : 'Geen stream gedetecteerd. Start een video op de website.',
               style: TextStyle(
                 color: _streamUrl != null ? Colors.green.shade800 : Colors.red.shade800,
@@ -144,17 +236,31 @@ class _HomePageState extends State<HomePage> {
                 controller.addJavaScriptHandler(
                   handlerName: 'streamDetected',
                   callback: (args) {
-                    final url = args[0] as String;
-                    if (mounted && !_detectedUrls.contains(url)) {
+                    final data = args[0] as Map<String, dynamic>;
+                    final url = data['url'] as String;
+                    final title = data['title'] as String? ?? 'Onbekende video';
+                    if (mounted) {
                       setState(() {
-                        _detectedUrls.add(url);
+                        if (!_detectedStreams.any((s) => s['url'] == url)) {
+                          _detectedStreams.add({'url': url, 'title': title});
+                        }
                         _streamUrl = url;
+                        _videoTitle = title;
                       });
                     }
                   },
                 );
               },
               onLoadStop: (controller, url) {
+                _injectStreamDetector();
+              },
+              onUpdateVisitedHistory: (controller, url, androidIsReload) {
+                setState(() {
+                  _detectedStreams.clear();
+                  _streamUrl = null;
+                  _videoTitle = null;
+                  _isCasting = false;
+                });
                 _injectStreamDetector();
               },
               initialSettings: InAppWebViewSettings(
@@ -170,10 +276,10 @@ class _HomePageState extends State<HomePage> {
         ],
       ),
       floatingActionButton: FloatingActionButton(
-        onPressed: _startSmartCasting,
-        backgroundColor: _streamUrl != null ? Theme.of(context).colorScheme.primary : Colors.grey,
-        child: const Icon(Icons.cast_connected),
-        tooltip: 'Start Casting',
+        onPressed: _handleCastButtonPress,
+        backgroundColor: _streamUrl != null ? Colors.red : Colors.grey,
+        child: Icon(_isCasting ? Icons.cast_connected : Icons.cast),
+        tooltip: 'Start of beheer Casting',
       ),
     );
   }
